@@ -5,7 +5,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { TypingIndicator } from "@/components/ui/typing-indicator";
 import { apiRequest } from "@/lib/queryClient";
-import { Send, Mic, User, Bot, Lightbulb, Code, HelpCircle, Sparkles } from "lucide-react";
+import { Send, User, Bot, Lightbulb, Code, HelpCircle, Sparkles } from "lucide-react";
 
 interface Message {
   id: string;
@@ -184,19 +184,10 @@ export default function Chat() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Type your message..."
-              className="min-h-[44px] max-h-32 pr-12 resize-none"
+              className="min-h-[44px] max-h-32 resize-none"
               rows={1}
               data-testid="message-input"
             />
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="absolute right-3 top-1/2 transform -translate-y-1/2 w-8 h-8 p-0"
-              data-testid="voice-button"
-            >
-              <Mic className="w-4 h-4" />
-            </Button>
           </div>
           <Button
             type="submit"
