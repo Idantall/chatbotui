@@ -1,0 +1,25 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist/public",
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/dist/public/$1"
+    }
+  ],
+  "functions": {
+    "api/chat.js": {
+      "maxDuration": 60
+    },
+    "api/assistant.js": {
+      "maxDuration": 30
+    },
+    "api/diag.js": {
+      "maxDuration": 10
+    }
+  }
+}

@@ -1,0 +1,250 @@
+// server/index.ts
+import express2 from "express";
+
+// server/routes.ts
+import { createServer } from "http";
+import OpenAI from "openai";
+async function registerRoutes(app2) {
+  const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY || process.env.API_KEY || "default_key"
+  });
+  const ASSISTANT_ID = process.env.ASSISTANT_ID || "asst_YwWtBI8O0YtanpYBstRDQxNN";
+  app2.get("/api/diag", async (req, res) => {
+    res.json({
+      node: process.version,
+      hasKey: !!process.env.OPENAI_API_KEY,
+      assistantId: process.env.ASSISTANT_ID || "asst_YwWtBI8O0YtanpYBstRDQxNN"
+    });
+  });
+  app2.get("/api/assistant", async (req, res) => {
+    try {
+      const id = process.env.ASSISTANT_ID || "asst_YwWtBI8O0YtanpYBstRDQxNN";
+      const a = await openai.beta.assistants.retrieve(id);
+      res.json({ id: a.id, model: a.model, name: a.name || null });
+    } catch (err) {
+      console.error("[assistant retrieve]", err);
+      res.status(err.status || 500).json({ error: err.message, code: err.code, type: err.type });
+    }
+  });
+  app2.post("/api/chat", async (req, res) => {
+    try {
+      const userText = (req.body?.user ?? "").toString().trim();
+      if (!userText) {
+        return res.status(400).json({ error: "Empty message" });
+      }
+      const thread = await openai.beta.threads.create({
+        messages: [{ role: "user", content: userText }]
+      });
+      const run = await openai.beta.threads.runs.create(thread.id, {
+        assistant_id: ASSISTANT_ID
+      });
+      let status = run.status;
+      let tries = 0;
+      while (status === "queued" || status === "in_progress") {
+        await new Promise((r) => setTimeout(r, 500));
+        const updated = await openai.beta.threads.runs.retrieve(run.id, {
+          thread_id: thread.id
+        });
+        status = updated.status;
+        if (++tries > 120) break;
+      }
+      if (status === "requires_action") {
+        return res.json({
+          text: "This Assistant requested tool calls. This minimal demo does not handle tool outputs.\n\nTip: disable custom tools on the Assistant or extend the server to submit tool outputs."
+        });
+      }
+      if (status !== "completed") {
+        return res.status(500).json({ error: `Run ended with status: ${status}` });
+      }
+      const msgs = await openai.beta.threads.messages.list(thread.id, { limit: 20 });
+      const assistantMsg = msgs.data.find((m) => m.role === "assistant");
+      let text = "(no reply)";
+      if (assistantMsg?.content?.length) {
+        text = assistantMsg.content.filter((p) => p.type === "text" && p.text?.value).map((p) => p.text.value).join("\n\n").trim() || text;
+      }
+      res.json({ text });
+    } catch (err) {
+      try {
+        if (err.status || err.code || err.type) {
+          console.error("[OpenAI APIError]", {
+            status: err.status,
+            code: err.code,
+            type: err.type,
+            message: err.message
+          });
+          return res.status(err.status || 500).json({
+            error: err.message || "OpenAI API error",
+            code: err.code,
+            type: err.type
+          });
+        }
+        console.error("[OpenAI error raw]", err);
+        return res.status(500).json({ error: String(err?.message || err) });
+      } catch (e) {
+        console.error("[Error handling error]", e, err);
+        return res.status(500).json({ error: "Unknown server error" });
+      }
+    }
+  });
+  const httpServer = createServer(app2);
+  return httpServer;
+}
+
+// server/vite.ts
+import express from "express";
+import fs from "fs";
+import path2 from "path";
+import { createServer as createViteServer, createLogger } from "vite";
+
+// vite.config.ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import path from "path";
+import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
+var vite_config_default = defineConfig({
+  plugins: [
+    react(),
+    runtimeErrorOverlay(),
+    ...process.env.NODE_ENV !== "production" && process.env.REPL_ID !== void 0 ? [
+      await import("@replit/vite-plugin-cartographer").then(
+        (m) => m.cartographer()
+      )
+    ] : []
+  ],
+  resolve: {
+    alias: {
+      "@": path.resolve(import.meta.dirname, "client", "src"),
+      "@shared": path.resolve(import.meta.dirname, "shared"),
+      "@assets": path.resolve(import.meta.dirname, "attached_assets")
+    }
+  },
+  root: path.resolve(import.meta.dirname, "client"),
+  build: {
+    outDir: path.resolve(import.meta.dirname, "dist/public"),
+    emptyOutDir: true
+  },
+  server: {
+    fs: {
+      strict: true,
+      deny: ["**/.*"]
+    }
+  }
+});
+
+// server/vite.ts
+import { nanoid } from "nanoid";
+var viteLogger = createLogger();
+function log(message, source = "express") {
+  const formattedTime = (/* @__PURE__ */ new Date()).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true
+  });
+  console.log(`${formattedTime} [${source}] ${message}`);
+}
+async function setupVite(app2, server) {
+  const serverOptions = {
+    middlewareMode: true,
+    hmr: { server },
+    allowedHosts: true
+  };
+  const vite = await createViteServer({
+    ...vite_config_default,
+    configFile: false,
+    customLogger: {
+      ...viteLogger,
+      error: (msg, options) => {
+        viteLogger.error(msg, options);
+        process.exit(1);
+      }
+    },
+    server: serverOptions,
+    appType: "custom"
+  });
+  app2.use(vite.middlewares);
+  app2.use("*", async (req, res, next) => {
+    const url = req.originalUrl;
+    try {
+      const clientTemplate = path2.resolve(
+        import.meta.dirname,
+        "..",
+        "client",
+        "index.html"
+      );
+      let template = await fs.promises.readFile(clientTemplate, "utf-8");
+      template = template.replace(
+        `src="/src/main.tsx"`,
+        `src="/src/main.tsx?v=${nanoid()}"`
+      );
+      const page = await vite.transformIndexHtml(url, template);
+      res.status(200).set({ "Content-Type": "text/html" }).end(page);
+    } catch (e) {
+      vite.ssrFixStacktrace(e);
+      next(e);
+    }
+  });
+}
+function serveStatic(app2) {
+  const distPath = path2.resolve(import.meta.dirname, "public");
+  if (!fs.existsSync(distPath)) {
+    throw new Error(
+      `Could not find the build directory: ${distPath}, make sure to build the client first`
+    );
+  }
+  app2.use(express.static(distPath));
+  app2.use("*", (_req, res) => {
+    res.sendFile(path2.resolve(distPath, "index.html"));
+  });
+}
+
+// server/index.ts
+var app = express2();
+app.use(express2.json());
+app.use(express2.urlencoded({ extended: false }));
+app.use((req, res, next) => {
+  const start = Date.now();
+  const path3 = req.path;
+  let capturedJsonResponse = void 0;
+  const originalResJson = res.json;
+  res.json = function(bodyJson, ...args) {
+    capturedJsonResponse = bodyJson;
+    return originalResJson.apply(res, [bodyJson, ...args]);
+  };
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    if (path3.startsWith("/api")) {
+      let logLine = `${req.method} ${path3} ${res.statusCode} in ${duration}ms`;
+      if (capturedJsonResponse) {
+        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+      }
+      if (logLine.length > 80) {
+        logLine = logLine.slice(0, 79) + "\u2026";
+      }
+      log(logLine);
+    }
+  });
+  next();
+});
+(async () => {
+  const server = await registerRoutes(app);
+  app.use((err, _req, res, _next) => {
+    const status = err.status || err.statusCode || 500;
+    const message = err.message || "Internal Server Error";
+    res.status(status).json({ message });
+    throw err;
+  });
+  if (app.get("env") === "development") {
+    await setupVite(app, server);
+  } else {
+    serveStatic(app);
+  }
+  const port = parseInt(process.env.PORT || "5000", 10);
+  server.listen({
+    port,
+    host: "0.0.0.0",
+    reusePort: true
+  }, () => {
+    log(`serving on port ${port}`);
+  });
+})();
