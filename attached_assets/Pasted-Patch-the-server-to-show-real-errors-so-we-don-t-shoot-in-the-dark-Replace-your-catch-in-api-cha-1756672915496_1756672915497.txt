@@ -1,0 +1,103 @@
+Patch the server to show real errors (so we don’t shoot in the dark)
+
+Replace your catch in /api/chat with:
+
+} catch (err) {
+  // Better error surfacing
+  try {
+    // New SDK errors
+    if (err.status || err.code || err.type) {
+      console.error('[OpenAI APIError]', {
+        status: err.status, code: err.code, type: err.type, message: err.message
+      });
+      return res.status(err.status || 500).json({
+        error: err.message || 'OpenAI API error',
+        code: err.code, type: err.type
+      });
+    }
+    // Generic fetch/undici errors
+    console.error('[OpenAI error raw]', err);
+    return res.status(500).json({ error: String(err?.message || err) });
+  } catch (e) {
+    console.error('[Error handling error]', e, err);
+    return res.status(500).json({ error: 'Unknown server error' });
+  }
+}
+
+
+This will return e.g. 401 invalid_api_key, 404 not_found: assistant, 429 insufficient_quota, etc.
+
+2) Add two tiny debug routes
+
+Drop these above the static file serving:
+
+// Quick env/version sanity check
+app.get('/api/diag', async (req, res) => {
+  res.json({
+    node: process.version,
+    hasKey: !!process.env.OPENAI_API_KEY,
+    assistantId: process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN'
+  });
+});
+
+// Verify the Assistant is reachable with THIS key/org
+app.get('/api/assistant', async (req, res) => {
+  try {
+    const id = process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN';
+    const a = await openai.beta.assistants.retrieve(id);
+    res.json({ id: a.id, model: a.model, name: a.name || null });
+  } catch (err) {
+    console.error('[assistant retrieve]', err);
+    res.status(err.status || 500).json({ error: err.message, code: err.code, type: err.type });
+  }
+});
+
+
+Now open these in the browser:
+
+/api/diag → should show hasKey: true
+
+/api/assistant → should return your assistant meta; if it 404s, the ID isn’t visible to the key (wrong org or typo).
+
+3) Common quick fixes
+
+Secrets: In Replit → Secrets (lock icon):
+
+OPENAI_API_KEY set? (no quotes/spaces)
+
+(optional) ASSISTANT_ID (to override the hardcoded one)
+
+Assistant access: If your key belongs to a different org than the Assistant, you’ll get 404 not_found. Use a key from the same org/team that owns asst_YwWtBI8O0YtanpYBstRDQxNN.
+
+SDK: In the Shell:
+
+npm ls openai
+# if outdated or missing:
+npm i openai@latest
+
+
+Node version: /api/diag prints process.version. Prefer Node 18+.
+
+Tools: If your Assistant uses user-defined function tools, my boilerplate doesn’t submit tool outputs yet. In that case you’ll see requires_action. (File Search / built-ins are fine.)
+
+4) If your Assistant needs tools, show a friendly message instead of 500
+
+You already have a check, but make it clearer:
+
+if (status === 'requires_action') {
+  return res.json({
+    text: 'This Assistant requested tool calls. This minimal demo does not handle tool outputs.\n\nTip: disable custom tools on the Assistant or extend the server to submit tool outputs.'
+  });
+}
+
+5) Optional: a one-shot curl sanity test (from the Replit shell)
+curl -s -H "Authorization: Bearer $OPENAI_API_KEY" \
+     -H "Content-Type: application/json" \
+     https://api.openai.com/v1/assistants/asst_YwWtBI8O0YtanpYBstRDQxNN
+# Expect JSON with the assistant id/model. 401/404 means key/org/ID issue.
+
+Why your console showed just 500
+
+The client only saw 500 (Internal Server Error) because the server returned a generic error. After the patch, you’ll see the real cause in both server logs and the JSON response.
+
+Run npm run dev again, hit /api/diag, /api/assistant, then try a message. Tell me what the new error JSON says if it’s still failing, and I’ll zero in on the fix.
