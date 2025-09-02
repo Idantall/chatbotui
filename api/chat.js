@@ -19,26 +19,44 @@ export default async function handler(req, res) {
   }
 
   try {
+    console.log('Chat API called - Method:', req.method);
+    console.log('Environment check - Has OpenAI key:', !!process.env.OPENAI_API_KEY);
+    
     // Ensure OpenAI API key exists
     if (!process.env.OPENAI_API_KEY) {
+      console.log('Error: OpenAI API key not configured');
       return res.status(500).json({ error: 'OpenAI API key not configured' });
     }
 
+    console.log('Initializing OpenAI client...');
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY
     });
 
     const ASSISTANT_ID = process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN';
+    console.log('Using Assistant ID:', ASSISTANT_ID);
     
     // Parse request body properly for Vercel
+    console.log('Raw request body:', req.body);
+    console.log('Request body type:', typeof req.body);
+    
     let body;
-    if (typeof req.body === 'string') {
-      body = JSON.parse(req.body);
-    } else {
-      body = req.body || {};
+    try {
+      if (typeof req.body === 'string') {
+        body = JSON.parse(req.body);
+      } else {
+        body = req.body || {};
+      }
+    } catch (parseError) {
+      console.log('JSON parse error:', parseError);
+      return res.status(400).json({ error: 'Invalid JSON in request body' });
     }
     
+    console.log('Parsed body:', body);
+    
     const userText = (body.user ?? '').toString().trim();
+    console.log('User text:', userText);
+    
     if (!userText) {
       return res.status(400).json({ error: 'Empty message' });
     }
@@ -90,6 +108,11 @@ export default async function handler(req, res) {
 
     res.json({ text });
   } catch (err) {
+    console.error('Full error object:', err);
+    console.error('Error name:', err?.name);
+    console.error('Error message:', err?.message);
+    console.error('Error stack:', err?.stack);
+    
     // Better error surfacing
     try {
       // New SDK errors
@@ -99,15 +122,25 @@ export default async function handler(req, res) {
         });
         return res.status(err.status || 500).json({
           error: err.message || 'OpenAI API error',
-          code: err.code, type: err.type
+          code: err.code, 
+          type: err.type
         });
       }
-      // Generic fetch/undici errors
-      console.error('[OpenAI error raw]', err);
-      return res.status(500).json({ error: String(err?.message || err) });
+      
+      // Generic errors
+      console.error('[Generic error]', err);
+      const errorMessage = err?.message || err?.toString() || 'Unknown error occurred';
+      return res.status(500).json({ 
+        error: errorMessage,
+        details: 'Check server logs for more information'
+      });
     } catch (e) {
-      console.error('[Error handling error]', e, err);
-      return res.status(500).json({ error: 'Unknown server error' });
+      console.error('[Error handling error]', e);
+      console.error('[Original error]', err);
+      return res.status(500).json({ 
+        error: 'Critical server error',
+        message: 'Unable to process request'
+      });
     }
   }
 }

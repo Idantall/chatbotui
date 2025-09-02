@@ -24,24 +24,48 @@ export default function Chat() {
 
   const sendMessageMutation = useMutation({
     mutationFn: async (text: string) => {
-      const response = await apiRequest("POST", "/api/chat", { user: text });
-      return response.json();
+      try {
+        const response = await apiRequest("POST", "/api/chat", { user: text });
+        const data = await response.json();
+        
+        // Ensure we have a valid response structure
+        if (!data || typeof data !== 'object') {
+          throw new Error('Invalid response format');
+        }
+        
+        return data;
+      } catch (error) {
+        console.error('API request failed:', error);
+        throw error;
+      }
     },
     onSuccess: (data) => {
+      // More robust data handling
+      const responseText = data?.text || data?.message || "(no reply)";
+      
       const assistantMessage: Message = {
         id: Date.now().toString() + "-assistant",
         role: "assistant",
-        text: data.text || "(no reply)",
+        text: responseText,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, assistantMessage]);
       setIsTyping(false);
     },
-    onError: () => {
+    onError: (error: any) => {
+      console.error('Message send error:', error);
+      
+      let errorMessage = "Failed to send message. Please try again.";
+      
+      // Try to extract more specific error information
+      if (error?.message) {
+        errorMessage = error.message;
+      }
+      
       toast({
         variant: "destructive",
         title: "Error",
-        description: "Failed to send message. Please try again.",
+        description: errorMessage,
       });
       setIsTyping(false);
     },
