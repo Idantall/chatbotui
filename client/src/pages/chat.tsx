@@ -18,6 +18,7 @@ export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [threadId, setThreadId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { toast } = useToast();
@@ -25,7 +26,10 @@ export default function Chat() {
   const sendMessageMutation = useMutation({
     mutationFn: async (text: string) => {
       try {
-        const response = await apiRequest("POST", "/api/chat", { user: text });
+        const response = await apiRequest("POST", "/api/chat", { 
+          user: text, 
+          threadId: threadId 
+        });
         const data = await response.json();
         
         // Ensure we have a valid response structure
@@ -40,6 +44,11 @@ export default function Chat() {
       }
     },
     onSuccess: (data) => {
+      // Update threadId if we got one back and don't have one yet
+      if (data.threadId && data.threadId !== threadId) {
+        setThreadId(data.threadId);
+      }
+      
       // More robust data handling
       const responseText = data?.text || data?.message || "(no reply)";
       
@@ -73,6 +82,12 @@ export default function Chat() {
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const startNewChat = () => {
+    setMessages([]);
+    setThreadId(null);
+    setInput("");
   };
 
   useEffect(() => {
@@ -141,9 +156,21 @@ export default function Chat() {
               <p className="text-sm text-muted-foreground">AI-powered conversation</p>
             </div>
           </div>
-          <div className="hidden sm:flex items-center gap-2">
-            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-            <span className="text-xs text-muted-foreground">Online</span>
+          <div className="flex items-center gap-3">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={startNewChat}
+              disabled={sendMessageMutation.isPending}
+              className="h-8 px-3 text-xs"
+              data-testid="new-chat-button"
+            >
+              New Chat
+            </Button>
+            <div className="hidden sm:flex items-center gap-2">
+              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+              <span className="text-xs text-muted-foreground">Online</span>
+            </div>
           </div>
         </div>
       </header>

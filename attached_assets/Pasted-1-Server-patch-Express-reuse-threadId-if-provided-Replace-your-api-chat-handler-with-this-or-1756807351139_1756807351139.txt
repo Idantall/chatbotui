@@ -1,0 +1,155 @@
+1) Server patch (Express) — reuse threadId if provided
+
+Replace your /api/chat handler with this (or adapt it 1:1). It creates a thread on first turn, reuses it on later turns, and returns { text, threadId }.
+
+app.post('/api/chat', async (req, res) => {
+  try {
+    const userText = (req.body?.user ?? '').toString().trim();
+    let threadId = (req.body?.threadId ?? '').toString().trim() || null;
+    if (!userText) return res.status(400).json({ error: 'Empty message' });
+
+    // 1) Create new thread for first message, or append to existing
+    if (!threadId) {
+      const thread = await openai.beta.threads.create({
+        messages: [{ role: 'user', content: userText }]
+      });
+      threadId = thread.id;
+    } else {
+      await openai.beta.threads.messages.create(threadId, {
+        role: 'user',
+        content: userText
+      });
+    }
+
+    // 2) Run the Assistant; add a tiny guardrail for follow-ups
+    const isFollowUp = !!req.body?.threadId;
+    const run = await openai.beta.threads.runs.create(threadId, {
+      assistant_id: process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN',
+      ...(isFollowUp && {
+        instructions:
+          'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי לנקודת העבודה הבאה.'
+      })
+    });
+
+    // 3) Poll for completion (minimal)
+    let status = run.status, tries = 0;
+    while (status === 'queued' || status === 'in_progress') {
+      await new Promise(r => setTimeout(r, 500));
+      const updated = await openai.beta.threads.runs.retrieve(threadId, run.id);
+      status = updated.status;
+      if (++tries > 120) break; // ~60s cap
+    }
+
+    if (status === 'requires_action') {
+      return res.json({
+        threadId,
+        text: 'Assistant requested tool calls; this minimal server does not handle tool outputs.'
+      });
+    }
+    if (status !== 'completed') {
+      return res.status(500).json({ error: `Run ended with status: ${status}`, threadId });
+    }
+
+    // 4) Return the last assistant message + the threadId
+    const msgs = await openai.beta.threads.messages.list(threadId, { limit: 50 });
+    const assistantMsg = msgs.data.find(m => m.role === 'assistant');
+
+    let text = '(no reply)';
+    if (assistantMsg?.content?.length) {
+      text = assistantMsg.content
+        .filter(p => p.type === 'text' && p.text?.value)
+        .map(p => p.text.value)
+        .join('\n\n')
+        .trim() || text;
+    }
+    res.json({ text, threadId });
+
+  } catch (err) {
+    console.error('[OpenAI error]', err);
+    return res.status(err.status || 500).json({
+      error: err.message || 'OpenAI error',
+      code: err.code, type: err.type
+    });
+  }
+});
+
+
+Keep your existing imports/OpenAI client. Ensure OPENAI_API_KEY is in Replit Secrets and (optionally) ASSISTANT_ID if you don’t want it hardcoded.
+
+2) Client patch (React) — hold threadId in state and send it
+
+In the component that submits messages (e.g., App.jsx):
+
+Add state for threadId.
+
+Include threadId in the POST body.
+
+After response, save the returned threadId in state (if not set yet).
+
+Provide a “New Chat” button that clears state → forces a brand-new thread on the next send.
+
+function App() {
+  const [msgs, setMsgs] = React.useState([]);
+  const [input, setInput] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [threadId, setThreadId] = React.useState(null);
+
+  async function send(e) {
+    e?.preventDefault();
+    const text = input.trim();
+    if (!text || busy) return;
+
+    setMsgs(m => [...m, { role: 'user', text }]);
+    setInput('');
+    setBusy(true);
+    try {
+      const r = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user: text, threadId })
+      });
+      const data = await r.json();
+      if (data.threadId && data.threadId !== threadId) setThreadId(data.threadId);
+      setMsgs(m => [...m, { role: 'assistant', text: data.text || '(no reply)' }]);
+    } catch {
+      setMsgs(m => [...m, { role: 'assistant', text: 'Error contacting server.' }]);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function newChat() {
+    setMsgs([]);
+    setThreadId(null); // resets per-session memory
+  }
+
+  return (
+    <>
+      {/* your chat UI */}
+      <form onSubmit={send}>
+        <textarea value={input} onChange={e => setInput(e.target.value)} />
+        <button disabled={busy || !input.trim()}>Send</button>
+        <button type="button" onClick={newChat} disabled={busy}>New Chat</button>
+      </form>
+    </>
+  );
+}
+
+
+That’s it—this gives you per-chat memory across messages in the same tab, and resets on refresh.
+
+3) Optional polish (helps stop greeting repeats)
+
+Add one line to your system prompt (you already have it in File Search / System):
+
+“אמירי את נוסח הפתיחה ושאלת המגדר פעם אחת בלבד בתחילת השיחה. אם כבר נאמרו—אל תחזרי עליהם.”
+
+(Your server’s instructions for follow-ups already nudge this, but the system line makes it robust.)
+
+4) Quick sanity checks
+
+First send on a fresh page → server returns { threadId: '...' }.
+
+Next messages in the same tab → you pass that same threadId and don’t see the greeting again.
+
+Click New Chat or refresh → new thread, greeting happens once again (as expected).
