@@ -77,26 +77,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!userText) return res.status(400).json({ error: 'Empty message' });
       if (!threadId) return res.status(400).json({ error: 'Missing threadId' });
 
-      // 0) Is this the first turn in this thread?
-      //    (Thread is created on mount with no messages.)
-      const prev = await openai.beta.threads.messages.list(threadId, { limit: 1 });
-      const isFirstTurn = prev.data.length === 0;
-
       // 1) Append the user message
       await openai.beta.threads.messages.create(threadId, {
         role: 'user',
         content: userText
       });
 
-      // 2) Run the assistant
-      //    - On FIRST turn: no extra instructions -> Assistant uses its own full intro & flow
-      //    - On FOLLOW-UP turns: append a gentle nudge not to repeat the intro
+      // 2) Run the assistant with NO instruction overrides - pure system prompt only
       const run = await openai.beta.threads.runs.createAndPoll(threadId, {
-        assistant_id: ASSISTANT_ID,
-        ...(isFirstTurn ? {} : {
-          additional_instructions:
-            'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי מנקודת העבודה הבאה.'
-        })
+        assistant_id: ASSISTANT_ID
+        // NO additional_instructions or instructions - let the assistant use its natural system prompt
       });
 
       if (run.status === 'requires_action') {
@@ -122,7 +112,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           .trim() || text;
       }
 
-      res.json({ text, threadId, _debug: { isFirstTurn } });
+      res.json({ text, threadId });
     } catch (e: any) {
       console.error('[api/chat]', e);
       res.status(e.status || 500).json({ error: e.message });
