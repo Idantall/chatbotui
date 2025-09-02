@@ -23,13 +23,32 @@ export default function Chat() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { toast } = useToast();
 
+  // Bootstrap thread on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch('/api/thread', { method: 'POST' });
+        const data = await r.json();
+        setThreadId(data.threadId);
+        console.log('Bootstrapped threadId:', data.threadId);
+      } catch (e) {
+        console.error('Failed to create thread:', e);
+      }
+    })();
+  }, []);
+
   const sendMessageMutation = useMutation({
     mutationFn: async (text: string) => {
+      if (!threadId) {
+        throw new Error('No thread ID available');
+      }
+      
       try {
-        const requestBody = { user: text, threadId: threadId };
-        console.log('Request body:', requestBody);
-        
-        const response = await apiRequest("POST", "/api/chat", requestBody);
+        console.log('Sending with threadId:', threadId);
+        const response = await apiRequest("POST", "/api/chat", { 
+          user: text, 
+          threadId: threadId 
+        });
         const data = await response.json();
         
         // Ensure we have a valid response structure
@@ -37,6 +56,7 @@ export default function Chat() {
           throw new Error('Invalid response format');
         }
         
+        console.log('Response threadId:', data.threadId); // should echo same id
         return data;
       } catch (error) {
         console.error('API request failed:', error);
@@ -44,12 +64,6 @@ export default function Chat() {
       }
     },
     onSuccess: (data) => {
-      console.log('API response received:', data);
-      if (!threadId && data.threadId) {
-        console.log('Storing new threadId:', data.threadId);
-        setThreadId(data.threadId);
-      }
-      
       // More robust data handling
       const responseText = data?.text || data?.message || "(no reply)";
       
@@ -85,10 +99,19 @@ export default function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  const startNewChat = () => {
+  const startNewChat = async () => {
     setMessages([]);
     setThreadId(null);
     setInput("");
+    // Re-bootstrap a fresh thread:
+    try {
+      const r = await fetch('/api/thread', { method: 'POST' });
+      const data = await r.json();
+      setThreadId(data.threadId);
+      console.log('New chat - threadId:', data.threadId);
+    } catch (e) {
+      console.error('Failed to create new thread:', e);
+    }
   };
 
   useEffect(() => {
@@ -109,7 +132,7 @@ export default function Chat() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
-    if (!text || sendMessageMutation.isPending) return;
+    if (!text || !threadId || sendMessageMutation.isPending) return; // ensure threadId exists
 
     const userMessage: Message = {
       id: Date.now().toString() + "-user",
@@ -243,7 +266,7 @@ export default function Chat() {
           </div>
           <Button
             type="submit"
-            disabled={!input.trim() || sendMessageMutation.isPending}
+            disabled={!input.trim() || !threadId || sendMessageMutation.isPending}
             className="w-11 h-11 p-0"
             data-testid="send-button"
           >
