@@ -35,15 +35,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Verify the Assistant is reachable with THIS key/org
   app.get('/api/assistant', async (req, res) => {
     try {
       const id = process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN';
       const a = await openai.beta.assistants.retrieve(id);
-      res.json({ id: a.id, model: a.model, name: a.name || null });
-    } catch (err: any) {
-      console.error('[assistant retrieve]', err);
-      res.status(err.status || 500).json({ error: err.message, code: err.code, type: err.type });
+      res.json({ id: a.id, name: a.name, model: a.model, instructionsPreview: a.instructions?.slice(0, 160) });
+    } catch (e: any) {
+      res.status(e.status || 500).json({ error: e.message });
     }
   });
 
@@ -60,13 +58,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         content: userText
       });
 
-      // 2) run assistant and poll until completed (SDK helper = fewer bugs)
-      const isFollowUp = true; // since the thread already exists
+      // 2) run assistant (⚠️ do NOT pass `instructions`, it overrides persona)
       const run = await openai.beta.threads.runs.createAndPoll(threadId, {
         assistant_id: process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN',
-        instructions: isFollowUp
-          ? 'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי מנקודת העבודה הבאה.'
-          : undefined
+        // optional, safe nudge that APPENDS instead of overriding:
+        additional_instructions:
+          'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי מנקודת העבודה הבאה.'
       });
 
       if (run.status === 'requires_action') {
