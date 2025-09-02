@@ -26,7 +26,6 @@ export default function Chat() {
   const sendMessageMutation = useMutation({
     mutationFn: async (text: string) => {
       try {
-        console.log('Sending request with threadId:', threadId);
         const requestBody = { user: text, threadId: threadId };
         console.log('Request body:', requestBody);
         
@@ -46,12 +45,8 @@ export default function Chat() {
     },
     onSuccess: (data) => {
       console.log('API response received:', data);
-      console.log('Current threadId:', threadId);
-      console.log('Response threadId:', data.threadId);
-      
-      // Update threadId if we got one back and don't have one yet
-      if (data.threadId && data.threadId !== threadId) {
-        console.log('Setting new threadId:', data.threadId);
+      if (!threadId && data.threadId) {
+        console.log('Storing new threadId:', data.threadId);
         setThreadId(data.threadId);
       }
       

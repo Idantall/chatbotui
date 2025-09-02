@@ -11,13 +11,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Use your Assistant ID (override with ASSISTANT_ID secret if you want)
   const ASSISTANT_ID = process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN';
 
-  // Quick env/version sanity check
-  app.get('/api/diag', async (req, res) => {
+  app.get('/api/diag', (req, res) => {
     res.json({
+      ok: true,
       node: process.version,
       hasKey: !!process.env.OPENAI_API_KEY,
-      assistantId: process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN'
+      assistantId: process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN',
+      build: 'patch-threadid-v1'
     });
+  });
+
+  app.post('/api/echo', (req, res) => {
+    res.json({ received: req.body ?? null, echoedAt: new Date().toISOString() });
   });
 
   // Verify the Assistant is reachable with THIS key/org
@@ -32,69 +37,66 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Chat endpoint - with threadId memory support  
   app.post('/api/chat', async (req, res) => {
     try {
-      const userText = (req.body?.user ?? '').toString().trim();
-      let threadId = (req.body?.threadId ?? '').toString().trim() || null;
-      
-      console.log('Express API - User text:', userText);
-      console.log('Express API - Thread ID from request:', threadId);
-      
+      const userTextRaw = req.body?.user;
+      const priorThreadId = req.body?.threadId ?? null;
+
+      const userText = (userTextRaw ?? '').toString().trim();
+      let threadId = (priorThreadId === null || priorThreadId === undefined || priorThreadId === '')
+        ? null
+        : String(priorThreadId);
+
       if (!userText) {
-        return res.status(400).json({ error: 'Empty message' });
+        return res.status(400).json({ error: 'Empty message', threadId: null });
       }
 
-      // 1) Create new thread for first message, or append to existing
+      // 1) Create or reuse thread
       if (!threadId) {
-        console.log('Creating new thread...');
         const thread = await openai.beta.threads.create({
           messages: [{ role: 'user', content: userText }]
         });
         threadId = thread.id;
-        console.log('New thread created:', threadId);
       } else {
-        console.log('Adding message to existing thread:', threadId);
         await openai.beta.threads.messages.create(threadId, {
           role: 'user',
           content: userText
         });
       }
 
-      // 2) Run the Assistant; add a tiny guardrail for follow-ups
-      const isFollowUp = !!req.body?.threadId;
+      // 2) Run assistant (nudge to avoid repeating greeting on follow-ups)
+      const isFollowUp = Boolean(priorThreadId);
       const run = await openai.beta.threads.runs.create(threadId, {
-        assistant_id: ASSISTANT_ID,
+        assistant_id: process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN',
         ...(isFollowUp && {
           instructions:
-            'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי לנקודת העבודה הבאה.'
+            'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי מהמקום שעצרנו.'
         })
       });
 
-      // 3) Poll for completion
-      let status = run.status;
-      let tries = 0;
+      // 3) Poll
+      let status = run.status, tries = 0;
       while (status === 'queued' || status === 'in_progress') {
         await new Promise(r => setTimeout(r, 500));
-        const updated = await openai.beta.threads.runs.retrieve(run.id, { 
-          thread_id: threadId 
-        });
+        const updated = await openai.beta.threads.runs.retrieve(threadId, run.id);
         status = updated.status;
         if (++tries > 120) break; // ~60s cap
       }
 
       if (status === 'requires_action') {
         return res.json({
-          threadId,
-          text: 'Assistant requested tool calls; this minimal server does not handle tool outputs.'
+          text: 'Assistant requested tool calls (not handled in this demo).',
+          threadId
+        });
+      }
+      if (status !== 'completed') {
+        return res.status(500).json({
+          error: `Run ended with status: ${status}`,
+          threadId
         });
       }
 
-      if (status !== 'completed') {
-        return res.status(500).json({ error: `Run ended with status: ${status}`, threadId });
-      }
-
-      // 4) Return the last assistant message + the threadId
+      // 4) Read last assistant message
       const msgs = await openai.beta.threads.messages.list(threadId, { limit: 50 });
       const assistantMsg = msgs.data.find(m => m.role === 'assistant');
 
@@ -107,28 +109,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           .trim() || text;
       }
 
-      console.log('Express API - Returning response - text length:', text.length, 'threadId:', threadId);
-      res.json({ text, threadId });
+      // Always return threadId
+      res.json({ text, threadId, _debug: { isFollowUp } });
     } catch (err: any) {
-      // Better error surfacing
-      try {
-        // New SDK errors
-        if (err.status || err.code || err.type) {
-          console.error('[OpenAI APIError]', {
-            status: err.status, code: err.code, type: err.type, message: err.message
-          });
-          return res.status(err.status || 500).json({
-            error: err.message || 'OpenAI API error',
-            code: err.code, type: err.type
-          });
-        }
-        // Generic fetch/undici errors
-        console.error('[OpenAI error raw]', err);
-        return res.status(500).json({ error: String(err?.message || err) });
-      } catch (e) {
-        console.error('[Error handling error]', e, err);
-        return res.status(500).json({ error: 'Unknown server error' });
-      }
+      console.error('[OpenAI error]', err);
+      res.status(err.status || 500).json({
+        error: err.message || 'OpenAI error',
+        code: err.code,
+        type: err.type,
+        threadId: null
+      });
     }
   });
 
