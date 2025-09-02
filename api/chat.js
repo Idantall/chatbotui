@@ -20,17 +20,28 @@ export default async function handler(req, res) {
 
   try {
     console.log('Chat API called - Method:', req.method);
+    console.log('All environment variables:', Object.keys(process.env));
     console.log('Environment check - Has OpenAI key:', !!process.env.OPENAI_API_KEY);
+    console.log('OpenAI key length:', process.env.OPENAI_API_KEY?.length || 0);
+    
+    // Multiple ways to access the API key (Vercel sometimes has different access patterns)
+    const apiKey = process.env.OPENAI_API_KEY || process.env['OPENAI_API_KEY'] || process.env.openai_api_key;
+    
+    console.log('Final API key check:', !!apiKey);
     
     // Ensure OpenAI API key exists
-    if (!process.env.OPENAI_API_KEY) {
+    if (!apiKey) {
       console.log('Error: OpenAI API key not configured');
-      return res.status(500).json({ error: 'OpenAI API key not configured' });
+      console.log('Available env vars:', Object.keys(process.env).filter(key => key.includes('OPENAI') || key.includes('openai')));
+      return res.status(500).json({ 
+        error: 'OpenAI API key not configured',
+        hint: 'Please set OPENAI_API_KEY in Vercel environment variables'
+      });
     }
 
     console.log('Initializing OpenAI client...');
     const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
+      apiKey: apiKey
     });
 
     const ASSISTANT_ID = process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN';
