@@ -135,6 +135,7 @@ export default async function handler(req, res) {
         .trim() || text;
     }
 
+    console.log('Returning response - text length:', text.length, 'threadId:', threadId);
     res.json({ text, threadId });
   } catch (err) {
     console.error('Full error object:', err);
