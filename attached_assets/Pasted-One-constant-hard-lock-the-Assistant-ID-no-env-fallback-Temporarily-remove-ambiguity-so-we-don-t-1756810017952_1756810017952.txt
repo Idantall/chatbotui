@@ -1,0 +1,157 @@
+One constant: hard-lock the Assistant ID (no env fallback)
+
+Temporarily remove ambiguity so we don’t accidentally hit a different assistant.
+
+// top of server (near OpenAI client)
+const ASSISTANT_ID = 'asst_YwWtBI8O0YtanpYBstRDQxNN';
+
+
+Later you can go back to process.env.ASSISTANT_ID || '...'.
+
+1) Verify the assistant really has your persona + tools
+
+Add this route (or update the one you have) and restart the server:
+
+app.get('/api/assistant', async (req, res) => {
+  try {
+    const a = await openai.beta.assistants.retrieve(ASSISTANT_ID);
+    const tools = (a.tools || []).map(t => t.type);
+    const vecIds = a.tool_resources?.file_search?.vector_store_ids || [];
+    res.json({
+      id: a.id,
+      name: a.name,
+      model: a.model,
+      instructionsLength: (a.instructions || '').length,
+      instructionsPreview: (a.instructions || '').slice(0, 160),
+      tools,
+      vectorStoreIds: vecIds
+    });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+
+Open /api/assistant in the browser. You should see:
+
+id: "asst_YwWt...",
+
+name: "RIKI bot",
+
+model: "gpt-4.1",
+
+instructionsLength > 0 and a preview that looks like your Riki persona,
+
+tools includes "file_search",
+
+vectorStoreIds has at least one id (if you attached a vector store).
+
+If instructionsLength is 0, or tools is missing file_search, that’s why it’s generic — fix in the dashboard or via API.
+
+2) Bootstrap a thread once per tab (you already do this)
+
+Keep your /api/thread route:
+
+app.post('/api/thread', async (req, res) => {
+  try {
+    const thread = await openai.beta.threads.create();
+    res.json({ threadId: thread.id });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+
+Client: call it on mount, store threadId in state. (You already confirmed this works.)
+
+3) Chat route: no instructions override
+
+Use createAndPoll and do not pass instructions. If you want the “don’t repeat greeting” nudge, use additional_instructions (this appends, doesn’t replace).
+
+app.post('/api/chat', async (req, res) => {
+  try {
+    const userText = (req.body?.user ?? '').toString().trim();
+    const threadId = (req.body?.threadId ?? '').toString().trim();
+    if (!userText) return res.status(400).json({ error: 'Empty message' });
+    if (!threadId) return res.status(400).json({ error: 'Missing threadId' });
+
+    // append user message to this thread
+    await openai.beta.threads.messages.create(threadId, {
+      role: 'user',
+      content: userText
+    });
+
+    // run WITHOUT overriding the assistant’s instructions
+    const run = await openai.beta.threads.runs.createAndPoll(threadId, {
+      assistant_id: ASSISTANT_ID,
+      // optional nudge (safe to keep / safe to remove):
+      additional_instructions:
+        'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי מנקודת העבודה הבאה.'
+    });
+
+    if (run.status === 'requires_action') {
+      return res.json({
+        text: 'Assistant requested tool calls; this minimal server does not handle tool outputs.',
+        threadId
+      });
+    }
+    if (run.status !== 'completed') {
+      return res.status(500).json({ error: `Run status: ${run.status}`, threadId });
+    }
+
+    // fetch last assistant reply
+    const msgs = await openai.beta.threads.messages.list(threadId, { limit: 50 });
+    const assistantMsg = msgs.data.find(m => m.role === 'assistant');
+    let text = '(no reply)';
+    if (assistantMsg?.content?.length) {
+      text = assistantMsg.content
+        .filter(p => p.type === 'text' && p.text?.value)
+        .map(p => p.text.value)
+        .join('\n\n')
+        .trim() || text;
+    }
+    res.json({ text, threadId });
+  } catch (e) {
+    console.error('[api/chat]', e);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+
+Important: If your SDK is old and doesn’t support additional_instructions, upgrade:
+
+npm i openai@latest
+
+4) If /api/assistant shows empty instructions/tools
+
+Then the assistant itself is the issue. Either:
+
+In the OpenAI dashboard, open the assistant asst_YwWtBI8O0YtanpYBstRDQxNN, paste your Revised System Prompt into the Instructions, set Model: gpt-4.1, and add the File Search tool with your vector store attached; Save.
+
+OR (API option — run once from your server or a script; fill your prompt text and vector store ids):
+
+await openai.beta.assistants.update(ASSISTANT_ID, {
+  model: 'gpt-4.1',
+  instructions: '<<< paste your full RIKI system prompt here >>>',
+  tools: [{ type: 'file_search' }],
+  tool_resources: { file_search: { vector_store_ids: ['vs_...'] } }
+});
+
+
+If vector_store_ids is empty, file search won’t work; persona will still work, but without RAG. You can list them via openai.beta.vectorStores.list() (if you created them via API) or grab the ID from the dashboard.
+
+5) Quick end-to-end test
+
+Open /api/assistant → confirm:
+
+correct id, name: "RIKI bot", model: "gpt-4.1",
+
+instructionsLength > 0 with your tone,
+
+tools include "file_search".
+
+Refresh the page (new session).
+
+First message → you should get RIKI’s opening (once).
+
+Follow-up → no repeated greeting, persona intact, uses your content.

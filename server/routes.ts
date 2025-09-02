@@ -8,15 +8,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     apiKey: process.env.OPENAI_API_KEY || process.env.API_KEY || "default_key"
   });
 
-  // Use your Assistant ID (override with ASSISTANT_ID secret if you want)
-  const ASSISTANT_ID = process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN';
+  // Hard-lock the Assistant ID (no env fallback to avoid ambiguity)
+  const ASSISTANT_ID = 'asst_YwWtBI8O0YtanpYBstRDQxNN';
 
   app.get('/api/diag', (req, res) => {
     res.json({
       ok: true,
       node: process.version,
       hasKey: !!process.env.OPENAI_API_KEY,
-      assistantId: process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN',
+      assistantId: ASSISTANT_ID,
       build: 'patch-threadid-v1'
     });
   });
@@ -37,9 +37,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/assistant', async (req, res) => {
     try {
-      const id = process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN';
-      const a = await openai.beta.assistants.retrieve(id);
-      res.json({ id: a.id, name: a.name, model: a.model, instructionsPreview: a.instructions?.slice(0, 160) });
+      const a = await openai.beta.assistants.retrieve(ASSISTANT_ID);
+      const tools = (a.tools || []).map((t: any) => t.type);
+      const vecIds = a.tool_resources?.file_search?.vector_store_ids || [];
+      res.json({
+        id: a.id,
+        name: a.name,
+        model: a.model,
+        instructionsLength: (a.instructions || '').length,
+        instructionsPreview: (a.instructions || '').slice(0, 160),
+        tools,
+        vectorStoreIds: vecIds
+      });
+    } catch (e: any) {
+      res.status(e.status || 500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/fix-assistant', async (req, res) => {
+    try {
+      const updated = await openai.beta.assistants.update(ASSISTANT_ID, {
+        tools: [{ type: 'file_search' }],
+        tool_resources: { 
+          file_search: { 
+            vector_store_ids: ['vs_68b499c77c8881919241a99a2ef0a8f0'] 
+          } 
+        }
+      });
+      res.json({ success: true, tools: updated.tools?.map((t: any) => t.type) });
     } catch (e: any) {
       res.status(e.status || 500).json({ error: e.message });
     }
@@ -60,7 +85,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // 2) run assistant (⚠️ do NOT pass `instructions`, it overrides persona)
       const run = await openai.beta.threads.runs.createAndPoll(threadId, {
-        assistant_id: process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN',
+        assistant_id: ASSISTANT_ID,
         // optional, safe nudge that APPENDS instead of overriding:
         additional_instructions:
           'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי מנקודת העבודה הבאה.'
