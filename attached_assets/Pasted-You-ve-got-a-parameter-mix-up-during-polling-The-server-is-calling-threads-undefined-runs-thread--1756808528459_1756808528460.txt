@@ -1,0 +1,140 @@
+You’ve got a parameter mix-up during polling. The server is calling
+
+/threads/undefined/runs/thread_9O6u...
+
+
+which means:
+
+the first param (thread id) is undefined
+
+the second param (run id) is actually a thread id (starts with thread_..., not run_...)
+
+That happens if the code calls runs.retrieve(<undefined>, <threadId>) (swapped or out-of-scope vars) instead of runs.retrieve(<threadId>, <runId>).
+
+Here’s a tight, drop-in /api/chat route that:
+
+always sets threadId
+
+uses the correct order for runs.create / runs.retrieve
+
+returns { text, threadId } every time
+
+logs the ids so you can see them in Replit logs
+
+Replace your /api/chat handler with this
+app.post('/api/chat', async (req, res) => {
+  try {
+    const userText = (req.body?.user ?? '').toString().trim();
+    let threadId =
+      req.body?.threadId === null || req.body?.threadId === undefined || req.body?.threadId === ''
+        ? null
+        : String(req.body.threadId);
+
+    if (!userText) {
+      return res.status(400).json({ error: 'Empty message', threadId: null });
+    }
+
+    // 1) Create or reuse thread
+    if (!threadId) {
+      const thread = await openai.beta.threads.create({
+        messages: [{ role: 'user', content: userText }],
+      });
+      threadId = thread.id; // e.g. "thread_..."
+    } else {
+      await openai.beta.threads.messages.create(threadId, {
+        role: 'user',
+        content: userText,
+      });
+    }
+
+    // 2) Run assistant (note: correct param order is (threadId, {...}))
+    const isFollowUp = Boolean(req.body?.threadId);
+    const run = await openai.beta.threads.runs.create(threadId, {
+      assistant_id: process.env.ASSISTANT_ID || 'asst_YwWtBI8O0YtanpYBstRDQxNN',
+      ...(isFollowUp && {
+        instructions:
+          'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי מהמקום שעצרנו.',
+      }),
+    });
+
+    // Debug: these should look like "thread_..." and "run_..."
+    console.log('[ids]', { threadId, runId: run?.id });
+
+    // Guard: run.id must start with run_
+    if (!run?.id || !String(run.id).startsWith('run_')) {
+      console.error('Unexpected run id:', run?.id);
+      return res.status(500).json({ error: 'Invalid run id from API', threadId });
+    }
+
+    // 3) Poll (correct order: (threadId, run.id))
+    let status = run.status;
+    let tries = 0;
+    while (status === 'queued' || status === 'in_progress') {
+      await new Promise((r) => setTimeout(r, 500));
+      const updated = await openai.beta.threads.runs.retrieve(threadId, run.id);
+      status = updated.status;
+      if (++tries > 120) break; // ~60s cap
+    }
+
+    if (status === 'requires_action') {
+      return res.json({
+        text: 'Assistant requested tool calls (not handled in this minimal demo).',
+        threadId,
+      });
+    }
+    if (status !== 'completed') {
+      return res.status(500).json({ error: `Run ended with status: ${status}`, threadId });
+    }
+
+    // 4) Read last assistant message
+    const msgs = await openai.beta.threads.messages.list(threadId, { limit: 50 });
+    const assistantMsg = msgs.data.find((m) => m.role === 'assistant');
+
+    let text = '(no reply)';
+    if (assistantMsg?.content?.length) {
+      text =
+        assistantMsg.content
+          .filter((p) => p.type === 'text' && p.text?.value)
+          .map((p) => p.text.value)
+          .join('\n\n')
+          .trim() || text;
+    }
+
+    return res.json({ text, threadId });
+  } catch (err) {
+    console.error('[OpenAI error]', err);
+    return res.status(err.status || 500).json({
+      error: err.message || 'OpenAI error',
+      code: err.code,
+      type: err.type,
+      threadId: null,
+    });
+  }
+});
+
+Quick smoke checks
+
+Server logs after first send should print something like:
+
+[ids] { threadId: 'thread_9O6u...', runId: 'run_gX3...' }
+
+
+If runId shows thread_..., your runs.create result isn’t being used (wrong variable). This patch fixes that.
+
+Client should log:
+
+Request body: { user: 'היי', threadId: null }
+API response: { text: '...', threadId: 'thread_9O6u...' }
+
+
+On the next send:
+
+Request body: { user: 'גבר', threadId: 'thread_9O6u...' }
+API response: { text: '...', threadId: 'thread_9O6u...' }
+
+
+Make sure you restarted the server (hit Run in Replit) and that your client calls a relative path (/api/chat) so it hits this instance.
+
+If you paste your current /api/chat function exactly, I can diff it and point to the line that swapped threadId/run.id.
+
+Chat
