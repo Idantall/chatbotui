@@ -77,18 +77,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!userText) return res.status(400).json({ error: 'Empty message' });
       if (!threadId) return res.status(400).json({ error: 'Missing threadId' });
 
-      // 1) append user message
+      // 0) Is this the first turn in this thread?
+      //    (Thread is created on mount with no messages.)
+      const prev = await openai.beta.threads.messages.list(threadId, { limit: 1 });
+      const isFirstTurn = prev.data.length === 0;
+
+      // 1) Append the user message
       await openai.beta.threads.messages.create(threadId, {
         role: 'user',
         content: userText
       });
 
-      // 2) run assistant (⚠️ do NOT pass `instructions`, it overrides persona)
+      // 2) Run the assistant
+      //    - On FIRST turn: no extra instructions -> Assistant uses its own full intro & flow
+      //    - On FOLLOW-UP turns: append a gentle nudge not to repeat the intro
       const run = await openai.beta.threads.runs.createAndPoll(threadId, {
         assistant_id: ASSISTANT_ID,
-        // optional, safe nudge that APPENDS instead of overriding:
-        additional_instructions:
-          'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי מנקודת העבודה הבאה.'
+        ...(isFirstTurn ? {} : {
+          additional_instructions:
+            'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי מנקודת העבודה הבאה.'
+        })
       });
 
       if (run.status === 'requires_action') {
@@ -101,7 +109,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(500).json({ error: `Run status: ${run.status}`, threadId });
       }
 
-      // 3) fetch last assistant message
+      // 3) Return last assistant reply
       const msgs = await openai.beta.threads.messages.list(threadId, { limit: 50 });
       const assistantMsg = msgs.data.find((m: any) => m.role === 'assistant');
 
@@ -114,14 +122,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           .trim() || text;
       }
 
-      return res.json({ text, threadId });
-    } catch (err: any) {
-      console.error('[api/chat]', err);
-      return res.status(err.status || 500).json({
-        error: err.message || 'OpenAI error',
-        code: err.code,
-        type: err.type
-      });
+      res.json({ text, threadId, _debug: { isFirstTurn } });
+    } catch (e: any) {
+      console.error('[api/chat]', e);
+      res.status(e.status || 500).json({ error: e.message });
     }
   });
 
