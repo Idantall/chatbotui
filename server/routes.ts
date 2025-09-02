@@ -32,30 +32,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Chat endpoint - fresh thread per message, no memory
+  // Chat endpoint - with threadId memory support  
   app.post('/api/chat', async (req, res) => {
     try {
       const userText = (req.body?.user ?? '').toString().trim();
+      let threadId = (req.body?.threadId ?? '').toString().trim() || null;
+      
+      console.log('Express API - User text:', userText);
+      console.log('Express API - Thread ID from request:', threadId);
+      
       if (!userText) {
         return res.status(400).json({ error: 'Empty message' });
       }
 
-      // 1) Create a fresh thread
-      const thread = await openai.beta.threads.create({
-        messages: [{ role: 'user', content: userText }]
-      });
-      // 2) Run it
-      const run = await openai.beta.threads.runs.create(thread.id, {
-        assistant_id: ASSISTANT_ID
+      // 1) Create new thread for first message, or append to existing
+      if (!threadId) {
+        console.log('Creating new thread...');
+        const thread = await openai.beta.threads.create({
+          messages: [{ role: 'user', content: userText }]
+        });
+        threadId = thread.id;
+        console.log('New thread created:', threadId);
+      } else {
+        console.log('Adding message to existing thread:', threadId);
+        await openai.beta.threads.messages.create(threadId, {
+          role: 'user',
+          content: userText
+        });
+      }
+
+      // 2) Run the Assistant; add a tiny guardrail for follow-ups
+      const isFollowUp = !!req.body?.threadId;
+      const run = await openai.beta.threads.runs.create(threadId, {
+        assistant_id: ASSISTANT_ID,
+        ...(isFollowUp && {
+          instructions:
+            'זו פנייה המשכית באותו הסשן; אל תחזרי על נוסח הפתיחה או שאלת המגדר—המשיכי לנקודת העבודה הבאה.'
+        })
       });
 
-      // 3) Poll for completion (simple boilerplate)
+      // 3) Poll for completion
       let status = run.status;
       let tries = 0;
       while (status === 'queued' || status === 'in_progress') {
         await new Promise(r => setTimeout(r, 500));
         const updated = await openai.beta.threads.runs.retrieve(run.id, { 
-          thread_id: thread.id 
+          thread_id: threadId 
         });
         status = updated.status;
         if (++tries > 120) break; // ~60s cap
@@ -63,28 +85,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       if (status === 'requires_action') {
         return res.json({
-          text: 'This Assistant requested tool calls. This minimal demo does not handle tool outputs.\n\nTip: disable custom tools on the Assistant or extend the server to submit tool outputs.'
+          threadId,
+          text: 'Assistant requested tool calls; this minimal server does not handle tool outputs.'
         });
       }
 
       if (status !== 'completed') {
-        return res.status(500).json({ error: `Run ended with status: ${status}` });
+        return res.status(500).json({ error: `Run ended with status: ${status}`, threadId });
       }
 
-      // 4) Get the assistant reply
-      const msgs = await openai.beta.threads.messages.list(thread.id, { limit: 20 });
+      // 4) Return the last assistant message + the threadId
+      const msgs = await openai.beta.threads.messages.list(threadId, { limit: 50 });
       const assistantMsg = msgs.data.find(m => m.role === 'assistant');
 
       let text = '(no reply)';
       if (assistantMsg?.content?.length) {
         text = assistantMsg.content
-          .filter(p => p.type === 'text' && p.text?.value)
-          .map(p => p.text.value)
+          .filter((p: any) => p.type === 'text' && p.text?.value)
+          .map((p: any) => p.text.value)
           .join('\n\n')
           .trim() || text;
       }
 
-      res.json({ text });
+      console.log('Express API - Returning response - text length:', text.length, 'threadId:', threadId);
+      res.json({ text, threadId });
     } catch (err: any) {
       // Better error surfacing
       try {
